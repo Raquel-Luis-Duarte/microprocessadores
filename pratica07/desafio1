@@ -1,1 +1,233 @@
+#include <xc.h>
+#include <stdio.h>
+#define _XTAL_FREQ 20000000
 
+// === Pinos LCD (modo 4 bits em RD0‑RD7) ===
+#define lcd_rs     PORTDbits.RD0
+#define lcd_enable PORTDbits.RD1
+#define lcd_db4    PORTDbits.RD4
+#define lcd_db5    PORTDbits.RD5
+#define lcd_db6    PORTDbits.RD6
+#define lcd_db7    PORTDbits.RD7
+
+// === Pino da Botoeira ===
+#define BOTOEIRA   PORTBbits.RB0
+
+// === Prototipagem das funções ===
+void lcd_init(void);
+void lcd_clear(void);
+void lcd_set_cursor(char linha, char coluna);
+void lcd_puts(const char *str);
+void lcd_putch(char c);
+void lcd_cmd(unsigned char cmd);
+void lcd_write(unsigned char data);
+void envia_nibble(unsigned char nibble);
+unsigned char contador_segundos(unsigned char tempo);
+void modo_seguranca(void);
+unsigned char verifica_botoeira(void);
+
+// === Inicialização LCD ===
+void envia_nibble(unsigned char nibble) {
+    lcd_db4 = (nibble >> 4) & 1;
+    lcd_db5 = (nibble >> 5) & 1;
+    lcd_db6 = (nibble >> 6) & 1;
+    lcd_db7 = (nibble >> 7) & 1;
+    lcd_enable = 1;
+    __delay_us(1);
+    lcd_enable = 0;
+    __delay_us(100);
+}
+
+void lcd_cmd(unsigned char cmd) {
+    lcd_rs = 0;
+    envia_nibble(cmd);
+    envia_nibble((unsigned char)(cmd << 4));
+    __delay_ms(2);
+}
+
+void lcd_write(unsigned char data) {
+    lcd_rs = 1;
+    envia_nibble(data);
+    envia_nibble((unsigned char)(data << 4));
+    __delay_ms(2);
+}
+
+void lcd_putch(char c) {
+    lcd_write(c);
+}
+
+void lcd_puts(const char *str) {
+    while (*str) {
+        lcd_putch(*str++);
+    }
+}
+
+void lcd_set_cursor(char linha, char coluna) {
+    char pos = (linha == 1) ? 0x80 : 0xC0;
+    pos += coluna;
+    lcd_cmd(pos);
+}
+
+void lcd_clear(void) {
+    lcd_cmd(0x01);
+    __delay_ms(2);
+}
+
+void lcd_init(void) {
+    TRISD = 0x00;
+    PORTD = 0x00;
+    lcd_enable = 0;
+    lcd_rs = 0;
+    __delay_ms(20);
+    envia_nibble(0x30);
+    __delay_ms(5);
+    envia_nibble(0x30);
+    __delay_us(150);
+    envia_nibble(0x30);
+    envia_nibble(0x20); // 4 bits
+    lcd_cmd(0x28); // 4 bits, 2 linhas, 5x8
+    lcd_cmd(0x0C); // Display on, cursor off
+    lcd_cmd(0x06); // Incrementa cursor
+    lcd_clear();
+}
+
+// === Verifica se a botoeira foi pressionada ===
+unsigned char verifica_botoeira(void) {
+    if (BOTOEIRA == 0) { // Botoeira pressionada (lógica invertida com pull-up)
+        __delay_ms(50); // Debounce
+        if (BOTOEIRA == 0) {
+            while (BOTOEIRA == 0); // Aguarda soltar
+            __delay_ms(50); // Debounce ao soltar
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// === Função de contagem no LCD com verificação de botoeira ===
+unsigned char contador_segundos(unsigned char tempo) {
+    char buffer[16];
+    for (int i = tempo; i >= 0; i--) {
+        // Verifica botoeira durante a contagem
+        if (verifica_botoeira()) {
+            modo_seguranca();
+            return 1; // Retorna 1 indicando que foi interrompido
+        }
+        
+        lcd_set_cursor(2, 0);
+        sprintf(buffer, "Tempo: %2ds   ", i);
+        lcd_puts(buffer);
+        __delay_ms(1000);
+    }
+    return 0; // Retorna 0 indicando conclusão normal
+}
+
+// === Modo de Segurança (Travessia de Pedestre) ===
+void modo_seguranca(void) {
+    char buffer[16];
+    
+    // Desliga todos os LEDs e acende o vermelho
+    PORTCbits.RC0 = 0;
+    PORTCbits.RC1 = 0;
+    PORTCbits.RC2 = 1; // LED vermelho
+    
+    // Mostra mensagem no LCD
+    lcd_clear();
+    lcd_set_cursor(1, 0);
+    lcd_puts("MODO PEDESTRE");
+    lcd_set_cursor(2, 0);
+    lcd_puts("Atravessar");
+    __delay_ms(1500);
+    
+    // Contagem regressiva de 10 segundos
+    for (int i = 10; i >= 0; i--) {
+        lcd_set_cursor(2, 0);
+        sprintf(buffer, "Cuidado! %2ds  ", i);
+        lcd_puts(buffer);
+        __delay_ms(1000);
+    }
+    
+    // Mensagem de retorno ao ciclo normal
+    lcd_clear();
+    lcd_set_cursor(1, 0);
+    lcd_puts("Retornando ao");
+    lcd_set_cursor(2, 0);
+    lcd_puts("ciclo normal...");
+    __delay_ms(1500);
+    
+    // Apaga todos os LEDs antes de retornar
+    PORTCbits.RC0 = 0;
+    PORTCbits.RC1 = 0;
+    PORTCbits.RC2 = 0;
+}
+
+// === Função principal ===
+void main(void) {
+    // Inicializações
+    lcd_init();
+    
+    TRISC = 0xF8; // RC0‑RC2 como saída (LEDs)
+    PORTC = 0x00;
+    
+    TRISBbits.TRISB0 = 1; // RB0 como entrada (botoeira)
+    INTCON2bits.RBPU = 0; // Habilita pull-ups da PORTB
+    
+    // Configura pinos como digitais (desabilita conversor AD)
+    ADCON1 = 0x0F; // Todas as portas como digitais
+    
+    // Mensagem de início
+    lcd_clear();
+    lcd_set_cursor(1, 0);
+    lcd_puts("Pratica 07:");
+    lcd_set_cursor(2, 0);
+    lcd_puts("Com botoeira");
+    __delay_ms(2000);
+    
+    while (1) {
+        // Apaga todos os LEDs no início do ciclo
+        PORTCbits.RC0 = 0;
+        PORTCbits.RC1 = 0;
+        PORTCbits.RC2 = 0;
+        
+        // Contagem inicial
+        lcd_clear();
+        lcd_set_cursor(1, 0);
+        lcd_puts("Iniciando...");
+        if (contador_segundos(5)) {
+            continue; // Se foi interrompido, reinicia o ciclo
+        }
+        
+        // Verde aceso por 10s
+        PORTCbits.RC0 = 1; // LED verde
+        PORTCbits.RC1 = 0;
+        PORTCbits.RC2 = 0;
+        lcd_clear();
+        lcd_set_cursor(1, 0);
+        lcd_puts("SINAL VERDE");
+        if (contador_segundos(10)) {
+            continue; // Se foi interrompido, reinicia o ciclo
+        }
+        
+        // Amarelo por 3s
+        PORTCbits.RC0 = 0;
+        PORTCbits.RC1 = 1; // LED amarelo
+        PORTCbits.RC2 = 0;
+        lcd_clear();
+        lcd_set_cursor(1, 0);
+        lcd_puts("ATENCAO...");
+        if (contador_segundos(3)) {
+            continue; // Se foi interrompido, reinicia o ciclo
+        }
+        
+        // Vermelho por 10s
+        PORTCbits.RC0 = 0;
+        PORTCbits.RC1 = 0;
+        PORTCbits.RC2 = 1; // LED vermelho
+        lcd_clear();
+        lcd_set_cursor(1, 0);
+        lcd_puts("PARE");
+        if (contador_segundos(10)) {
+            continue; // Se foi interrompido, reinicia o ciclo
+        }
+    }
+}
